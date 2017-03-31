@@ -32,6 +32,7 @@ import numpy
 
 import theano
 import theano.tensor as T
+from theano.ifelse import ifelse
 from theano.tensor.signal import pool
 from theano.tensor.nnet import conv2d
 
@@ -42,7 +43,7 @@ from mlp import HiddenLayer
 class LeNetConvPoolLayer(object):
     """Pool Layer of a convolutional network """
 
-    def __init__(self, rng, input, filter_shape, image_shape, poolsize=(2, 2)):
+    def __init__(self, rng, input, filter_shape, image_shape, poolsize=(2, 2), activation=T.tanh):
         """
         Allocate a LeNetConvPoolLayer with shared variable internal parameters.
 
@@ -108,7 +109,11 @@ class LeNetConvPoolLayer(object):
         # reshape it to a tensor of shape (1, n_filters, 1, 1). Each bias will
         # thus be broadcasted across mini-batches and feature map
         # width & height
-        self.output = T.tanh(pooled_out + self.b.dimshuffle('x', 0, 'x', 'x'))
+        lin_output = pooled_out + self.b.dimshuffle('x', 0, 'x', 'x')
+        self.output = (
+            lin_output if activation is None
+            else activation(lin_output)
+        )
 
         # store parameters of this layer
         self.params = [self.W, self.b]
@@ -120,7 +125,7 @@ class LeNetConvPoolLayer(object):
 class lenet5:
     def __init__(self,
                         dataset='mnist.pkl.gz',
-                        nkerns=[20, 50], batch_size=500, update_rule = 'regular', config=None):
+                        nkerns=[20, 50], batch_size=500, update_rule = 'regular', config=None, dropout=0, activation='tanh'):
         """ Demonstrates lenet on MNIST dataset
 
         :type learning_rate: float
@@ -136,6 +141,13 @@ class lenet5:
         :type nkerns: list of ints
         :param nkerns: number of kernels on each layer
         """
+        if activation=='tanh':
+            activation_fn = T.tanh
+        # Set activation function to none because with PreLU additional alpha variables have to be initialized
+        # by setting the activation function to None the linear activation will be retrieved which then can be
+        # activated by my PreLU implementation
+        elif activation=='PreLU':
+            activation_fn = None
 
         rng = numpy.random.RandomState(23455)
 
@@ -159,7 +171,9 @@ class lenet5:
         self.val_error_history = []
         self.train_error_history = []
         # allocate symbolic variables for the data
+
         index = T.lscalar()  # index to a [mini]batch
+        mode = T.lscalar() # 1 = training (dropout enabled), 0 = testing (dropout disabled)
 
         # start-snippet-1
         x = T.matrix('x')   # the data is presented as rasterized images
@@ -185,8 +199,21 @@ class lenet5:
             input=layer0_input,
             image_shape=(batch_size, 1, 28, 28),
             filter_shape=(nkerns[0], 1, 5, 5),
-            poolsize=(2, 2)
+            poolsize=(2, 2),
+            activation = activation_fn
         )
+        if(activation=='PreLU'):
+            ########################
+            # PreLU Implementation #
+            ########################
+            # if the activation function is PreLU alpha has to be initialized with the same shape as the bias
+            # alpha will be initialized at 0.25 as suggested in the article that introduced PreLU
+            # Reference: Delving Deep into Rectifiers: Surpassing Human-Level Performance on ImageNet Classification
+            # (Kaiming He; Xiangyu Zhang; Shaoqing Ren; Jian Sun, Microsoft, 2015)
+            alpha0 = theano.shared(numpy.ones(layer0.b.get_value().shape,dtype=theano.config.floatX)*0.25, borrow=True)
+            layer1_input = self.PreLU(layer0.output, alpha0.dimshuffle('x', 0, 'x', 'x'))
+        else:
+            layer1_input = layer0.output
 
         # Construct the second convolutional pooling layer
         # filtering reduces the image size to (12-5+1, 12-5+1) = (8, 8)
@@ -194,41 +221,82 @@ class lenet5:
         # 4D output tensor is thus of shape (batch_size, nkerns[1], 4, 4)
         layer1 = LeNetConvPoolLayer(
             rng,
-            input=layer0.output,
+            input=layer1_input,
             image_shape=(batch_size, nkerns[0], 12, 12),
             filter_shape=(nkerns[1], nkerns[0], 5, 5),
-            poolsize=(2, 2)
+            poolsize=(2, 2),
+            activation = activation_fn
         )
+        if (activation == 'PreLU'):
+            alpha1 = theano.shared(numpy.ones(layer1.b.get_value().shape, dtype=theano.config.floatX) * 0.25,
+                                   borrow=True)
+            layer1_output = self.PreLU(layer1.output, alpha1.dimshuffle('x', 0, 'x', 'x'))
+        else:
+            layer1_output = layer1.output
 
         # the HiddenLayer being fully-connected, it operates on 2D matrices of
         # shape (batch_size, num_pixels) (i.e matrix of rasterized images).
         # This will generate a matrix of shape (batch_size, nkerns[1] * 4 * 4),
         # or (500, 50 * 4 * 4) = (500, 800) with the default values.
-        layer2_input = layer1.output.flatten(2)
+        layer2_input = layer1_output.flatten(2)
 
-        # construct a fully-connected sigmoidal layer
+        # Add dropout if dropout value is higher than 0 and in training mode
+        if(dropout>0):
+            layer2_input = theano.ifelse.ifelse(theano.tensor.eq(mode, 1), self.Dropout(layer2_input, dropout, rng), layer2_input)
+
         layer2 = HiddenLayer(
             rng,
             input=layer2_input,
             n_in=nkerns[1] * 4 * 4,
             n_out=500,
-            activation=T.tanh
+            activation=activation_fn
         )
+        if (activation == 'PreLU'):
+            alpha2 = theano.shared(numpy.ones(layer2.b.get_value().shape, dtype=theano.config.floatX) * 0.25,
+                                   borrow=True)
+            layer2_output = self.PreLU(layer2.output, alpha2)
+        else:
+            layer2_output = layer2.output
+
+        # Add dropout if dropout value is higher than 0 and in training mode
+        if (dropout > 0):
+            layer3_input = theano.ifelse.ifelse(theano.tensor.eq(mode, 1), self.Dropout(layer2_output, dropout, rng),
+                                                layer2_output)
+        else:
+            layer3_input = layer2_output
 
         # classify the values of the fully-connected sigmoidal layer
-        layer3 = LogisticRegression(input=layer2.output, n_in=500, n_out=10)
+        layer3 = LogisticRegression(input=layer3_input, n_in=500, n_out=10)
 
         # the cost we minimize during training is the NLL of the model
         cost = layer3.negative_log_likelihood(y)
-
+        #self.print_output = theano.function(
+        #    [index],
+        #    [alpha0.dimshuffle('x',0,'x','x'), layer0.b, layer0.output],
+        #    givens={
+        #        x: test_set_x[index * batch_size: (index + 1) * batch_size],
+        #    },
+        #    on_unused_input='ignore'
+        #)
+        self.print_layer2 = theano.function(
+            [index],
+            layer2_input,
+            givens={
+                x: test_set_x[index * batch_size: (index + 1) * batch_size],
+                mode: 1
+            },
+            on_unused_input = 'ignore' # if dropout<0 the 'mode' variable will be unused
+        )
         # create a function to compute the mistakes that are made by the model
         self.test_model = theano.function(
             [index],
             layer3.errors(y),
             givens={
                 x: test_set_x[index * batch_size: (index + 1) * batch_size],
-                y: test_set_y[index * batch_size: (index + 1) * batch_size]
-            }
+                y: test_set_y[index * batch_size: (index + 1) * batch_size],
+                mode: 0
+            },
+            on_unused_input = 'ignore' # if dropout<0 the 'mode' variable will be unused
         )
 
         self.validate_model = theano.function(
@@ -236,21 +304,28 @@ class lenet5:
             layer3.errors(y),
             givens={
                 x: valid_set_x[index * batch_size: (index + 1) * batch_size],
-                y: valid_set_y[index * batch_size: (index + 1) * batch_size]
-            }
+                y: valid_set_y[index * batch_size: (index + 1) * batch_size],
+                mode: 0
+            },
+            on_unused_input = 'ignore' # if dropout<0 the 'mode' variable will be unused
         )
         self.train_error_model = theano.function(
             [index],
             layer3.errors(y),
             givens={
                 x: train_set_x[index * batch_size: (index + 1) * batch_size],
-                y: train_set_y[index * batch_size: (index + 1) * batch_size]
-            }
+                y: train_set_y[index * batch_size: (index + 1) * batch_size],
+                mode: 0
+            },
+            on_unused_input = 'ignore' # if dropout<0 the 'mode' variable will be unused
         )
 
         # create a list of all model parameters to be fit by gradient descent
         params = layer3.params + layer2.params + layer1.params + layer0.params
 
+        if activation == 'PreLU':
+            alpha = [alpha0, alpha1, alpha2]
+            params += alpha
         # create a list of gradients for all model parameters
         grads = T.grad(cost, params)
 
@@ -266,8 +341,13 @@ class lenet5:
                 (param, param - 0.1 * grad)
                 for param, grad in zip(params, grads)
             ]
+            ###########################
+            # AdaDelta implementation #
+            ###########################
+            # Implementing the adaDelta update rule as described in AdaDelta: An adaptive learning rate method
+            # (Matthew D. Zeiler, Google, 2012)
         elif update_rule=='adaDelta':
-            # Implementing the adaDelta update rule as described in ADADELTA: AN ADAPTIVE LEARNING RATE METHOD (Matthew D. Zeiler, Google, 2012)
+
             if(config is None): config = {}
             config.setdefault('decay_rate',0.95)
             config.setdefault('epsilon',1e-6)
@@ -283,14 +363,17 @@ class lenet5:
                 theano.shared(numpy.zeros_like(param.get_value(),dtype=theano.config.floatX),borrow=True)
                 for param in params
             ]
+            # The updated E(g^2) value is calculated and will be added to the parameter updates
             Egrads_new = [
                 config['decay_rate'] * Egrad + (1 - config['decay_rate']) * (grad ** 2)
                 for (Egrad, grad) in zip(Egrads, grads)
             ]
+            # The parameter update is calculated using the AdaDelta update rule
             dxs = [
                 -(T.sqrt(Edx + config['epsilon']) / T.sqrt(Egrad_new + config['epsilon'])) * grad
                 for (Edx, Egrad_new, grad) in zip(Edxs, Egrads_new, grads)
                 ]
+            # The updated E(dx^2) value is calculated and will be added to the parameter updates
             Edxs_new = [
                 config['decay_rate']*Edx + (1-config['decay_rate']) * (dx ** 2)
                 for (Edx, dx) in zip(Edxs, dxs)
@@ -301,6 +384,8 @@ class lenet5:
                 (param, param+dx)
                 for (param, dx) in zip(params, dxs)
             ]
+            # The new E(g^2) and E(dx^2) are added to the parameter updates so they will be updated at the same time
+            # as the model parameters.
             updates = param_updates + Egrads_updates + Edxs_updates
 
         else:
@@ -311,14 +396,18 @@ class lenet5:
             updates=updates,
             givens={
                 x: train_set_x[index * batch_size: (index + 1) * batch_size],
-                y: train_set_y[index * batch_size: (index + 1) * batch_size]
-            }
+                y: train_set_y[index * batch_size: (index + 1) * batch_size],
+                mode: 1 # in training mode dropout is enabled (if dropout>0)
+            },
+            on_unused_input = 'ignore' # if dropout<0 the 'mode' variable will be unused
         )
+
         # end-snippet-1
 
         ###############
         # TRAIN MODEL #
         ###############
+
     def train(self, n_epochs=10):
         print('... training')
         # early-stopping parameters
@@ -405,7 +494,24 @@ class lenet5:
                os.path.split(__file__)[1] +
                ' ran for %.2fm' % ((end_time - start_time) / 60.)), file=sys.stderr)
 
+    def Dropout(self, input, dropout, rng):
+        ##########################
+        # Dropout implementation #
+        ##########################
+        # Dropout was introduced in Dropout: A Simple Way to Prevent Neural Networks from Overfitting (Nitish Srivastava;
+        # Geoffrey Hinton; Alex Krizhevsky; Ilya Sutskever; Ruslan Salakhutdinov, 2014) and aims to reduce overfitting
+        # by randomly dropping out a certain portion of the hidden units.
 
+        # Create a matrix of the same size as the input where for each value in the matrix the value will be set to 1 with
+        # a probability of (1-dropout) and the value will be set to zero with a probability of dropout
+        mask = T.shared_randomstreams.RandomStreams(rng.randint(123456)).binomial(n=1, p=1 - dropout, size=input.shape)
+
+        # multiply the input with the mask so a certain part of the input is dropped and scale the output so there is
+        # no need to scale the inputs at test mode
+        return input * T.cast(mask, theano.config.floatX) * (1./(1-dropout))
+
+    def PreLU(self, input, alpha):
+        return T.switch(input < 0, alpha * input, input)
 
 
 
