@@ -11,7 +11,7 @@ You have to implement this based on your own insight. Copying code from other pl
 Run short experiments to see if the added functionalities add anything to the performance of the system.
 
 # Results
-The experiments were performed in jupyter notebook and the results can be found <a href="https://github.com/daviddemeij/scyfer-challenge/blob/master/scyfer-challenge.ipynb">here</a>.
+The experiments were performed in jupyter notebook and the results can be found <a href="/scyfer-challenge.ipynb">here</a>.
 
 # Code
-The added functionalities are coded in the <a href="https://github.com/daviddemeij/scyfer-challenge/blob/master/convolutional_mlp.py">convolution_mlp.py file</a>, I transformed the initial evaluate_lenet5() function into a python class for easier experimentation.
+The added functionalities are coded in the <a href="/convolutional_mlp.py">convolution_mlp.py file</a>, I transformed the initial evaluate_lenet5() function into a python class for easier experimentation.
