@@ -3,9 +3,9 @@ Run through the Theano Deep Learning example:
 http://deeplearning.net/tutorial/lenet.html#lenet
 
 Add the following functionality to the example:
-Adadelta learning rate update
-Dropout 
-PreLU units
+- Adadelta learning rate update
+- Dropout 
+- PreLU units
 
 You have to implement this based on your own insight. Copying code from other places is not allowed.
 Run short experiments to see if the added functionalities add anything to the performance of the system.
